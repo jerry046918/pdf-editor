@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
-use std::io::{BufRead, BufReader, Read, Write};
-use std::process::{Command, Stdio};
+use std::io::{BufRead, BufReader, Write};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::{Arc, Mutex};
 
 /// JSON-RPC request structure
 #[derive(Debug, Serialize)]
@@ -18,7 +19,7 @@ struct JsonRpcResponse {
     result: Option<serde_json::Value>,
     #[serde(default)]
     error: Option<JsonRpcError>,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     id: Option<u64>,
 }
 
@@ -29,138 +30,208 @@ pub struct JsonRpcError {
     pub message: String,
 }
 
-/// Get the sidecar executable path
-fn get_sidecar_path() -> Result<std::path::PathBuf, String> {
-    // In production, use the bundled sidecar
-    #[cfg(not(debug_assertions))]
-    {
-        // Get the exe directory
-        let exe_dir = std::env::current_exe()
-            .map_err(|e| format!("Failed to get exe path: {}", e))?;
-        let exe_dir = exe_dir.parent().ok_or("Failed to get exe directory")?;
-        
-        // Look for sidecar in the same directory
-        let sidecar_name = if cfg!(windows) {
-            "pdf-sidecar-x86_64-pc-windows-msvc.exe"
-        } else {
-            "pdf-sidecar-x86_64-unknown-linux-gnu"
-        };
-        
-        let sidecar_path = exe_dir.join(sidecar_name);
-        
-        if sidecar_path.exists() {
-            return Ok(sidecar_path);
-        }
-        
-        // Fallback: look in binaries subdirectory
-        let sidecar_path = exe_dir.join("binaries").join(sidecar_name);
-        if sidecar_path.exists() {
-            return Ok(sidecar_path);
-        }
-    }
-    
-    // In development, return None to use Python directly
-    Err("Sidecar not found, using Python".to_string())
+/// Persistent sidecar process manager
+pub struct SidecarManager {
+    child: Option<Child>,
+    stdin: Option<ChildStdin>,
+    stdout: Option<BufReader<ChildStdout>>,
+    request_id: u64,
 }
 
-/// Call the Python sidecar
-pub fn call_sidecar(
-    method: &str,
-    params: serde_json::Value,
-) -> Result<serde_json::Value, String> {
-    // Create JSON-RPC request
-    let request = JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        method: method.to_string(),
-        params,
-        id: 1,
-    };
+impl SidecarManager {
+    /// Create a new sidecar manager
+    pub fn new() -> Self {
+        Self {
+            child: None,
+            stdin: None,
+            stdout: None,
+            request_id: 0,
+        }
+    }
     
-    let request_json = serde_json::to_string(&request)
-        .map_err(|e| format!("Failed to serialize request: {}", e))?;
-    
-    // Try to use bundled sidecar first (production)
-    let mut child = if let Ok(sidecar_path) = get_sidecar_path() {
-        Command::new(&sidecar_path)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("Failed to spawn sidecar '{}': {}", sidecar_path.display(), e))?
-    } else {
-        // Development mode: use Python directly
-        let current_dir = std::env::current_dir()
-            .map_err(|e| format!("Failed to get current directory: {}", e))?;
+    /// Start or restart the sidecar process
+    pub fn start(&mut self) -> Result<(), String> {
+        // Kill existing process if any
+        self.stop()?;
         
-        let project_root = if current_dir.file_name().map(|n| n == "src-tauri").unwrap_or(false) {
-            current_dir.parent().unwrap_or(&current_dir).to_path_buf()
-        } else {
-            current_dir.clone()
+        let sidecar_path = get_sidecar_path()?;
+        
+        #[cfg(windows)]
+        let mut child = {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            Command::new(&sidecar_path)
+                .creation_flags(CREATE_NO_WINDOW)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("Failed to spawn sidecar '{}': {}", sidecar_path.display(), e))?
         };
         
-        let script_path = project_root
-            .join("pdf-sidecar")
-            .join("src")
-            .join("__main__.py")
-            .to_string_lossy()
-            .to_string();
-        
-        Command::new("python")
-            .arg("-u")
-            .arg(&script_path)
-            .env("PYTHONIOENCODING", "utf-8")
+        #[cfg(not(windows))]
+        let mut child = Command::new(&sidecar_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| format!("Failed to spawn Python: {}. Make sure Python is installed.", e))?
-    };
-    
-    // Send request via stdin
-    if let Some(mut stdin) = child.stdin.take() {
-        writeln!(stdin, "{}", request_json)
-            .map_err(|e| format!("Failed to write to stdin: {}", e))?;
-        stdin.flush()
-            .map_err(|e| format!("Failed to flush stdin: {}", e))?;
-    } else {
-        return Err("Failed to get stdin".to_string());
+            .map_err(|e| format!("Failed to spawn sidecar '{}': {}", sidecar_path.display(), e))?;
+        
+        let stdin = child.stdin.take().ok_or("Failed to get stdin")?;
+        let stdout = child.stdout.take().ok_or("Failed to get stdout")?;
+        let stdout = BufReader::new(stdout);
+        
+        self.child = Some(child);
+        self.stdin = Some(stdin);
+        self.stdout = Some(stdout);
+        
+        Ok(())
     }
     
-    // Read response from stdout
-    let response = if let Some(stdout) = child.stdout.take() {
-        let mut reader = BufReader::new(stdout);
-        let mut line = String::new();
-        reader.read_line(&mut line)
-            .map_err(|e| format!("Failed to read from stdout: {}", e))?;
-        line
-    } else {
-        return Err("Failed to get stdout".to_string());
-    };
-    
-    // Read stderr for debugging
-    let stderr_output = if let Some(mut stderr) = child.stderr.take() {
-        let mut error_output = String::new();
-        Read::read_to_string(&mut stderr, &mut error_output).ok();
-        error_output
-    } else {
-        String::new()
-    };
-    
-    // Wait for process
-    let status = child.wait()
-        .map_err(|e| format!("Failed to wait for process: {}", e))?;
-    
-    if !status.success() {
-        return Err(format!("Sidecar failed ({}): {}", status, stderr_output));
+    /// Stop the sidecar process
+    pub fn stop(&mut self) -> Result<(), String> {
+        if let Some(mut child) = self.child.take() {
+            child.kill().ok();
+            child.wait().ok();
+        }
+        self.stdin = None;
+        self.stdout = None;
+        Ok(())
     }
     
-    // Parse response
-    let rpc_response: JsonRpcResponse = serde_json::from_str(&response)
-        .map_err(|e| format!("Failed to parse response '{}': {}", response.trim(), e))?;
-    
-    if let Some(error) = rpc_response.error {
-        return Err(format!("JSON-RPC error {}: {}", error.code, error.message));
+    /// Check if sidecar is running
+    pub fn is_running(&mut self) -> bool {
+        if let Some(ref mut child) = self.child {
+            match child.try_wait() {
+                Ok(Some(_)) => false, // Process has exited
+                Ok(None) => true,      // Still running
+                Err(_) => false,
+            }
+        } else {
+            false
+        }
     }
     
-    rpc_response.result.ok_or_else(|| "No result in response".to_string())
+    /// Ensure sidecar is running
+    fn ensure_running(&mut self) -> Result<(), String> {
+        if !self.is_running() {
+            self.start()?;
+        }
+        Ok(())
+    }
+    
+    /// Call a method on the sidecar
+    pub fn call(&mut self, method: &str, params: serde_json::Value) -> Result<serde_json::Value, String> {
+        self.ensure_running()?;
+        
+        self.request_id += 1;
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: method.to_string(),
+            params,
+            id: self.request_id,
+        };
+        
+        let request_json = serde_json::to_string(&request)
+            .map_err(|e| format!("Failed to serialize request: {}", e))?;
+        
+        // Send request
+        if let Some(ref mut stdin) = self.stdin {
+            writeln!(stdin, "{}", request_json)
+                .map_err(|e| format!("Failed to write to stdin: {}", e))?;
+            stdin.flush()
+                .map_err(|e| format!("Failed to flush stdin: {}", e))?;
+        } else {
+            return Err("No stdin available".to_string());
+        }
+        
+        // Read response
+        let response = if let Some(ref mut stdout) = self.stdout {
+            let mut line = String::new();
+            stdout.read_line(&mut line)
+                .map_err(|e| format!("Failed to read from stdout: {}", e))?;
+            line
+        } else {
+            return Err("No stdout available".to_string());
+        };
+        
+        // Parse response
+        let rpc_response: JsonRpcResponse = serde_json::from_str(&response)
+            .map_err(|e| format!("Failed to parse response '{}': {}", response.trim(), e))?;
+        
+        if let Some(error) = rpc_response.error {
+            return Err(format!("JSON-RPC error {}: {}", error.code, error.message));
+        }
+        
+        rpc_response.result.ok_or_else(|| "No result in response".to_string())
+    }
+}
+
+impl Drop for SidecarManager {
+    fn drop(&mut self) {
+        self.stop().ok();
+    }
+}
+
+/// Get the sidecar executable path
+fn get_sidecar_path() -> Result<std::path::PathBuf, String> {
+    let exe_dir = std::env::current_exe()
+        .map_err(|e| format!("Failed to get exe path: {}", e))?;
+    let exe_dir = exe_dir.parent().ok_or("Failed to get exe directory")?;
+    
+    let sidecar_name = if cfg!(windows) {
+        "pdf-sidecar-x86_64-pc-windows-msvc.exe"
+    } else {
+        "pdf-sidecar-x86_64-unknown-linux-gnu"
+    };
+    
+    // Try in the same directory
+    let sidecar_path = exe_dir.join(sidecar_name);
+    if sidecar_path.exists() {
+        return Ok(sidecar_path);
+    }
+    
+    // Try in binaries subdirectory
+    let sidecar_path = exe_dir.join("binaries").join(sidecar_name);
+    if sidecar_path.exists() {
+        return Ok(sidecar_path);
+    }
+    
+    // Try with .exe extension only (PyInstaller default name)
+    #[cfg(windows)]
+    {
+        let sidecar_path = exe_dir.join("pdf-sidecar.exe");
+        if sidecar_path.exists() {
+            return Ok(sidecar_path);
+        }
+    }
+    
+    Err("Sidecar executable not found".to_string())
+}
+
+// Global sidecar manager singleton
+lazy_static::lazy_static! {
+    static ref SIDECAR_MANAGER: Arc<Mutex<SidecarManager>> = Arc::new(Mutex::new(SidecarManager::new()));
+}
+
+/// Call the Python sidecar (using persistent process)
+pub fn call_sidecar(method: &str, params: serde_json::Value) -> Result<serde_json::Value, String> {
+    let mut manager = SIDECAR_MANAGER.lock()
+        .map_err(|_| "Failed to lock sidecar manager")?;
+    
+    manager.call(method, params)
+}
+
+/// Initialize sidecar on app startup
+pub fn init_sidecar() -> Result<(), String> {
+    let mut manager = SIDECAR_MANAGER.lock()
+        .map_err(|_| "Failed to lock sidecar manager")?;
+    manager.start()
+}
+
+/// Shutdown sidecar on app exit
+pub fn shutdown_sidecar() -> Result<(), String> {
+    let mut manager = SIDECAR_MANAGER.lock()
+        .map_err(|_| "Failed to lock sidecar manager")?;
+    manager.stop()
 }

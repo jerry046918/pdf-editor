@@ -127,37 +127,60 @@
 
 ---
 
-## 安装
+## 安装与分发
+
+### 📦 获取安装包
+
+本项目提供多种分发方式：
+
+| 类型 | 文件 | 大小 | 说明 |
+|------|------|------|------|
+| **NSIS安装包** | `PDF Editor_0.1.0_x64-setup.exe` | ~48 MB | 推荐普通用户，安装界面友好 |
+| **MSI安装包** | `PDF Editor_0.1.0_x64_en-US.msi` | ~50 MB | 适合企业部署和组策略分发 |
+| **便携版** | `portable/` 文件夹 | ~59 MB | 绿色便携，解压即用 |
+
+#### 安装包位置
+```
+src-tauri/target/release/bundle/
+├── msi/PDF Editor_0.1.0_x64_en-US.msi    # MSI安装包
+├── nsis/PDF Editor_0.1.0_x64-setup.exe   # NSIS安装包
+└── ../                                   # release目录下有直接可执行文件
+```
+
+### 🚀 快速开始
+
+#### 方式一：安装版（推荐）
+1. 双击 `PDF Editor_0.1.0_x64-setup.exe`
+2. 按照安装向导完成安装
+3. 启动应用即可使用
+
+#### 方式二：便携版
+1. 将 `portable/` 文件夹复制到任意位置
+2. 双击 `PDF Editor.exe` 运行
+3. 无需安装，可放在U盘随身携带
+
+> 💡 **提示**：便携版两个文件必须在同一目录下
+
+### 💻 系统要求
+
+- **操作系统**：Windows 10/11 (x64)
+- **运行时**：无需额外安装（所有依赖已打包）
+- **磁盘空间**：约 100 MB
+
+---
+
+## 开发环境设置
 
 ### 系统要求
 
 - **操作系统**：Windows 10/11
 - **运行时**：Python 3.11+
 - **包管理器**：[pnpm](https://pnpm.io/)（推荐）
+- **编译器**：Rust (Edition 2021)
 
-### 开发环境设置
+### 安装步骤
 
 1. **克隆仓库**
-```bash
-git clone https://github.com/your-username/pdf-editor.git
-cd pdf-editor
-```
-
-2. **安装前端依赖**
-```bash
-pnpm install
-```
-
-3. **安装Python依赖**
-```bash
-cd pdf-sidecar
-pip install -r requirements.txt
-```
-
-4. **安装Rust**
-- 访问 [rustup.rs](https://rustup.rs/)
-- 按照说明安装Rust
-
 ---
 
 ## 开发
@@ -288,10 +311,9 @@ pdf-editor/
 - [ ] 书签分拆模式未实现（`split.py`）
 - [ ] CSP已禁用（安全性待加强）
 - [ ] PyMuPDF AGPL-3.0许可证兼容性检查
-- [ ] Sidecar未配置打包（需添加`externalBin`）
+- [x] ~~Sidecar未配置打包~~ ✅ 已完成
 - [ ] 无单元/集成测试
 - [ ] 无CI/CD流程
-
 ---
 
 ## 许可证
