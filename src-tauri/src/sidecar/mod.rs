@@ -29,29 +29,45 @@ pub struct JsonRpcError {
     pub message: String,
 }
 
+/// Get the sidecar executable path
+fn get_sidecar_path() -> Result<std::path::PathBuf, String> {
+    // In production, use the bundled sidecar
+    #[cfg(not(debug_assertions))]
+    {
+        // Get the exe directory
+        let exe_dir = std::env::current_exe()
+            .map_err(|e| format!("Failed to get exe path: {}", e))?;
+        let exe_dir = exe_dir.parent().ok_or("Failed to get exe directory")?;
+        
+        // Look for sidecar in the same directory
+        let sidecar_name = if cfg!(windows) {
+            "pdf-sidecar-x86_64-pc-windows-msvc.exe"
+        } else {
+            "pdf-sidecar-x86_64-unknown-linux-gnu"
+        };
+        
+        let sidecar_path = exe_dir.join(sidecar_name);
+        
+        if sidecar_path.exists() {
+            return Ok(sidecar_path);
+        }
+        
+        // Fallback: look in binaries subdirectory
+        let sidecar_path = exe_dir.join("binaries").join(sidecar_name);
+        if sidecar_path.exists() {
+            return Ok(sidecar_path);
+        }
+    }
+    
+    // In development, return None to use Python directly
+    Err("Sidecar not found, using Python".to_string())
+}
+
 /// Call the Python sidecar
 pub fn call_sidecar(
     method: &str,
     params: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    // Get the project root
-    let current_dir = std::env::current_dir()
-        .map_err(|e| format!("Failed to get current directory: {}", e))?;
-    
-    // If we're in src-tauri, go to parent directory
-    let project_root = if current_dir.file_name().map(|n| n == "src-tauri").unwrap_or(false) {
-        current_dir.parent().unwrap_or(&current_dir).to_path_buf()
-    } else {
-        current_dir.clone()
-    };
-    
-    let script_path = project_root
-        .join("pdf-sidecar")
-        .join("src")
-        .join("__main__.py")
-        .to_string_lossy()
-        .to_string();
-    
     // Create JSON-RPC request
     let request = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
@@ -63,16 +79,42 @@ pub fn call_sidecar(
     let request_json = serde_json::to_string(&request)
         .map_err(|e| format!("Failed to serialize request: {}", e))?;
     
-    // Spawn Python process with UTF-8 encoding
-    let mut child = Command::new("python")
-        .arg("-u")  // Unbuffered output
-        .arg(&script_path)
-        .env("PYTHONIOENCODING", "utf-8")  // Force UTF-8 encoding
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to spawn Python: {}. Make sure Python is installed.", e))?;
+    // Try to use bundled sidecar first (production)
+    let mut child = if let Ok(sidecar_path) = get_sidecar_path() {
+        Command::new(&sidecar_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to spawn sidecar '{}': {}", sidecar_path.display(), e))?
+    } else {
+        // Development mode: use Python directly
+        let current_dir = std::env::current_dir()
+            .map_err(|e| format!("Failed to get current directory: {}", e))?;
+        
+        let project_root = if current_dir.file_name().map(|n| n == "src-tauri").unwrap_or(false) {
+            current_dir.parent().unwrap_or(&current_dir).to_path_buf()
+        } else {
+            current_dir.clone()
+        };
+        
+        let script_path = project_root
+            .join("pdf-sidecar")
+            .join("src")
+            .join("__main__.py")
+            .to_string_lossy()
+            .to_string();
+        
+        Command::new("python")
+            .arg("-u")
+            .arg(&script_path)
+            .env("PYTHONIOENCODING", "utf-8")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to spawn Python: {}. Make sure Python is installed.", e))?
+    };
     
     // Send request via stdin
     if let Some(mut stdin) = child.stdin.take() {
@@ -109,7 +151,7 @@ pub fn call_sidecar(
         .map_err(|e| format!("Failed to wait for process: {}", e))?;
     
     if !status.success() {
-        return Err(format!("Python failed ({}): {}", status, stderr_output));
+        return Err(format!("Sidecar failed ({}): {}", status, stderr_output));
     }
     
     // Parse response
