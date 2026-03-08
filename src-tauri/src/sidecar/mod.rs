@@ -1,14 +1,10 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::io::{BufRead, BufWriter, Write};
-use std::process::{ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::{Arc, Mutex};
-use tauri::Runtime;
-use tauri_plugin_shell::ShellExt;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::process::{Command, Stdio};
 
 /// JSON-RPC request structure
 #[derive(Debug, Serialize)]
-pub struct JsonRpcRequest {
+struct JsonRpcRequest {
     jsonrpc: String,
     method: String,
     params: serde_json::Value,
@@ -17,13 +13,13 @@ pub struct JsonRpcRequest {
 
 /// JSON-RPC response structure
 #[derive(Debug, Deserialize)]
-pub struct JsonRpcResponse<T> {
-    pub jsonrpc: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub result: Option<T>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<JsonRpcError>,
-    pub id: u64,
+struct JsonRpcResponse {
+    #[serde(default)]
+    result: Option<serde_json::Value>,
+    #[serde(default)]
+    error: Option<JsonRpcError>,
+    #[serde(default)]
+    id: Option<u64>,
 }
 
 /// JSON-RPC error structure
@@ -33,71 +29,96 @@ pub struct JsonRpcError {
     pub message: String,
 }
 
-/// PDF Sidecar client
-pub struct PdfSidecar {
-    stdin: Arc<Mutex<ChildStdin>>,
-    request_id: Arc<Mutex<u64>>,
-}
-
-impl PdfSidecar {
-    pub fn new<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<Self, String> {
-        let shell = app.shell();
-        
-        // Start the sidecar process
-        let sidecar_command = Command::new_sidecar("pdf-sidecar")
-            .map_err(|e| format!("Failed to create sidecar command: {}", e))?;
-        
-        let (mut rx, tx) = std::sync::mpsc::channel();
-        
-        let (mut reader, writer) = pipe()
-            .map_err(|e| format!("Failed to create pipe: {}", e))?;
-        
-        // Spawn the sidecar process
-        let output = shell
-            .command(sidecar_command)
-            .current_dir(std::env::current_dir().unwrap_or_default())
-            .output()
-            .map_err(|e| format!("Failed to spawn sidecar: {}", e))?;
-        
-        Ok(Self {
-            stdin: Arc::new(Mutex::new(output.stdin)),
-            request_id: Arc::new(Mutex::new(0)),
-        })
+/// Call the Python sidecar
+pub fn call_sidecar(
+    method: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    // Get the project root
+    let current_dir = std::env::current_dir()
+        .map_err(|e| format!("Failed to get current directory: {}", e))?;
+    
+    // If we're in src-tauri, go to parent directory
+    let project_root = if current_dir.file_name().map(|n| n == "src-tauri").unwrap_or(false) {
+        current_dir.parent().unwrap_or(&current_dir).to_path_buf()
+    } else {
+        current_dir.clone()
+    };
+    
+    let script_path = project_root
+        .join("pdf-sidecar")
+        .join("src")
+        .join("__main__.py")
+        .to_string_lossy()
+        .to_string();
+    
+    // Create JSON-RPC request
+    let request = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: method.to_string(),
+        params,
+        id: 1,
+    };
+    
+    let request_json = serde_json::to_string(&request)
+        .map_err(|e| format!("Failed to serialize request: {}", e))?;
+    
+    // Spawn Python process with UTF-8 encoding
+    let mut child = Command::new("python")
+        .arg("-u")  // Unbuffered output
+        .arg(&script_path)
+        .env("PYTHONIOENCODING", "utf-8")  // Force UTF-8 encoding
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to spawn Python: {}. Make sure Python is installed.", e))?;
+    
+    // Send request via stdin
+    if let Some(mut stdin) = child.stdin.take() {
+        writeln!(stdin, "{}", request_json)
+            .map_err(|e| format!("Failed to write to stdin: {}", e))?;
+        stdin.flush()
+            .map_err(|e| format!("Failed to flush stdin: {}", e))?;
+    } else {
+        return Err("Failed to get stdin".to_string());
     }
     
-    /// Send a request to the sidecar and get response
-    pub async fn call<T: for<'a> Deserialize<'a>>(
-        &self,
-        method: &str,
-        params: serde_json::Value,
-    ) -> Result<T, String> {
-        let id = {
-            let mut req_id = self.request_id.lock().unwrap();
-            *req_id += 1;
-            *req_id
-        };
-        
-        let request = JsonRpcRequest {
-            jsonrpc: "2.0".to_string(),
-            method: method.to_string(),
-            params,
-            id,
-        };
-        
-        // Send request
-        let request_json = serde_json::to_string(&request)
-            .map_err(|e| format!("Failed to serialize request: {}", e))?;
-        
-        {
-            let mut stdin = self.stdin.lock().unwrap();
-            writeln!(stdin, "{}", request_json)
-                .map_err(|e| format!("Failed to write to sidecar: {}", e))?;
-            stdin.flush()
-                .map_err(|e| format!("Failed to flush sidecar stdin: {}", e))?;
-        }
-        
-        // For now, return a placeholder
-        // TODO: Implement response reading
-        Err("Response reading not yet implemented".to_string())
+    // Read response from stdout
+    let response = if let Some(stdout) = child.stdout.take() {
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        reader.read_line(&mut line)
+            .map_err(|e| format!("Failed to read from stdout: {}", e))?;
+        line
+    } else {
+        return Err("Failed to get stdout".to_string());
+    };
+    
+    // Read stderr for debugging
+    let stderr_output = if let Some(mut stderr) = child.stderr.take() {
+        let mut error_output = String::new();
+        Read::read_to_string(&mut stderr, &mut error_output).ok();
+        error_output
+    } else {
+        String::new()
+    };
+    
+    // Wait for process
+    let status = child.wait()
+        .map_err(|e| format!("Failed to wait for process: {}", e))?;
+    
+    if !status.success() {
+        return Err(format!("Python failed ({}): {}", status, stderr_output));
     }
+    
+    // Parse response
+    let rpc_response: JsonRpcResponse = serde_json::from_str(&response)
+        .map_err(|e| format!("Failed to parse response '{}': {}", response.trim(), e))?;
+    
+    if let Some(error) = rpc_response.error {
+        return Err(format!("JSON-RPC error {}: {}", error.code, error.message));
+    }
+    
+    rpc_response.result.ok_or_else(|| "No result in response".to_string())
 }

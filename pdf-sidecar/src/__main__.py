@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""
-PDF Sidecar - JSON-RPC Server for PDF Operations
-"""
+"""PDF Sidecar - JSON-RPC Server for PDF Operations"""
 
 import sys
 import json
 import logging
 from typing import Any
+from pathlib import Path
+
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Configure logging
 logging.basicConfig(
@@ -53,17 +55,14 @@ class JSONRPCServer:
         method = request.get('method')
         params = request.get('params', {})
         
-        # Validate request
         if not method:
             return self._error_response(request_id, -32600, 'Invalid Request: method is required')
         
-        # Find method handler
-        handler = self.methods.get(method)
-        if not handler:
+        if method not in self.methods:
             return self._error_response(request_id, -32601, f'Method not found: {method}')
         
         try:
-            result = handler(params)
+            result = self.methods[method](params or {})
             return self._success_response(request_id, result)
         except Exception as e:
             logger.exception(f"Error executing {method}")
@@ -93,14 +92,19 @@ class JSONRPCServer:
         logger.info("PDF Sidecar started, waiting for requests...")
         
         try:
-            for line in sys.stdin:
-                line = line.strip()
-                if not line:
-                    continue
-                
+            # Read binary data from stdin to avoid encoding issues on Windows
+            stdin_buffer = sys.stdin.buffer if hasattr(sys.stdin, 'buffer') else sys.stdin
+            
+            for line_bytes in stdin_buffer:
                 try:
+                    # Decode as UTF-8
+                    line = line_bytes.decode('utf-8').strip() if isinstance(line_bytes, bytes) else line_bytes.strip()
+                    if not line:
+                        continue
+                    
+                    logger.info(f"Raw input: {line}")
                     request = json.loads(line)
-                    logger.debug(f"Received request: {request.get('method')}")
+                    logger.info(f"Parsed request: {request.get('method')}")
                     
                     response = self.handle_request(request)
                     print(json.dumps(response), flush=True)
@@ -108,7 +112,6 @@ class JSONRPCServer:
                 except json.JSONDecodeError as e:
                     error_response = self._error_response(None, -32700, f'Parse error: {e}')
                     print(json.dumps(error_response), flush=True)
-                    
         except KeyboardInterrupt:
             logger.info("Shutting down...")
         except Exception as e:
@@ -121,13 +124,13 @@ def main():
     server = JSONRPCServer()
     
     # Import and register handlers
-    from src.handlers import merge, split, convert, edit
+    from src.handlers import merge, split, convert, edit, thumbnails
     
     merge.register(server)
     split.register(server)
     convert.register(server)
     edit.register(server)
-    
+    thumbnails.register(server)
     server.run()
 
 
