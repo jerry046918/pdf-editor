@@ -13,8 +13,7 @@
   <!-- Logo -->
   <div class="p-6 border-b border-gray-200">
     <h1 class="text-xl font-bold text-gray-800 flex items-center gap-2">
-      <svg class="w-8 h-8 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V15a2 2 0 01-2 2h-2m8 7v8a2 2 0 002 2h6M8 7V5a2 2 0 00-2-2v10a2 2 0 002 2h8a2 2 0 012-2.586 1 1 0 01.707.293l4.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+      <img src="/logo.png" alt="PDF Editor Logo" class="w-8 h-8" />
       PDF编辑器
     </h1>
     <p class="text-xs text-gray-500 mt-1">v0.1.0</p>
