@@ -50,6 +50,48 @@
   // Extract mode
   let pagesToExtract = $state('');
 
+  // 解析页码字符串为页码集合，支持格式：1,3,5,7-10
+  function parsePagesInput(input: string): Set<number> {
+    const pages = new Set<number>();
+    if (!input.trim()) return pages;
+
+    const parts = input.split(',').map(s => s.trim()).filter(s => s);
+    for (const part of parts) {
+      if (part.includes('-')) {
+        // 范围格式：1-5
+        const [startStr, endStr] = part.split('-').map(s => s.trim());
+        const start = parseInt(startStr, 10);
+        const end = parseInt(endStr, 10);
+        if (!isNaN(start) && !isNaN(end) && start > 0 && end > 0) {
+          const min = Math.min(start, end);
+          const max = Math.max(start, end);
+          for (let i = min; i <= max; i++) {
+            if (totalPages === 0 || i <= totalPages) {
+              pages.add(i);
+            }
+          }
+        }
+      } else {
+        // 单个页码
+        const page = parseInt(part, 10);
+        if (!isNaN(page) && page > 0 && (totalPages === 0 || page <= totalPages)) {
+          pages.add(page);
+        }
+      }
+    }
+    return pages;
+  }
+
+  // 当输入框内容变化时，同步到 selectedPages
+  function onPagesInputKeyup() {
+    const parsed = parsePagesInput(pagesToExtract);
+    // 比较是否相同，避免循环更新
+    if (parsed.size !== selectedPages.size ||
+        ![...parsed].every(p => selectedPages.has(p))) {
+      selectedPages = parsed;
+    }
+  }
+
   async function selectFile() {
     try {
       const selected = await open({
@@ -577,11 +619,12 @@
           {:else}
             <p class="text-sm text-gray-500 mb-2">请在下方预览中点击选择要提取的页面</p>
           {/if}
-          <input 
-            type="text" 
-            bind:value={pagesToExtract} 
-            class="w-full px-3 py-2 border rounded text-sm" 
-            placeholder="或直接输入页码，如: 1,3,5,7-10" 
+          <input
+            type="text"
+            bind:value={pagesToExtract}
+            onkeyup={onPagesInputKeyup}
+            class="w-full px-3 py-2 border rounded text-sm"
+            placeholder="或直接输入页码，如: 1,3,5,7-10"
           />
         </div>
       {/if}
