@@ -1,6 +1,6 @@
 {
   "name": "pdf_editor",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "PDF桌面编辑器 - 合并、分拆、图片转PDF、文字编辑",
   "type": "module",
   "scripts": {
