@@ -41,3 +41,26 @@ export interface EditOperation {
     color: string;
   };
 }
+
+// 批量分拆相关类型
+export interface BatchFile {
+  path: string;
+  name: string;
+  pageCount: number;
+}
+
+export interface BatchSplitResult {
+  file: string;
+  success: boolean;
+  output_files?: string[];
+  error?: string;
+}
+
+export interface BatchSplitResponse {
+  success: boolean;
+  error?: string;
+  results: BatchSplitResult[];
+  total_files: number;
+  success_count: number;
+  failed_count: number;
+}

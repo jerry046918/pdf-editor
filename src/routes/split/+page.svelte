@@ -29,6 +29,22 @@
     page_count?: number;
   }
 
+  interface BatchSplitResult {
+    file: string;
+    success: boolean;
+    error?: string;
+    output_files?: string[];
+  }
+
+  interface BatchSplitResponse {
+    success: boolean;
+    error?: string;
+    results: BatchSplitResult[];
+    total_files: number;
+    success_count: number;
+    failed_count: number;
+  }
+
   let inputFile: { path: string; name: string } | null = $state(null);
   let splitMode: 'range' | 'fixed' | 'extract' = $state('range');
   let isProcessing = $state(false);
@@ -46,10 +62,21 @@
   
   // Fixed mode
   let pagesPerFile = $state(5);
+
+  // Validate pagesPerFile - ensure it's at least 1
+  $effect(() => {
+    if (pagesPerFile < 1) {
+      pagesPerFile = 1;
+    }
+  });
   
   // Extract mode
   let pagesToExtract = $state('');
 
+  // Batch mode
+  let isBatchMode = $state(false);
+  let batchFiles: { path: string; name: string; pageCount: number }[] = $state([]);
+  let minPageCount = $state(0);
   // 解析页码字符串为页码集合，支持格式：1,3,5,7-10
   function parsePagesInput(input: string): Set<number> {
     const pages = new Set<number>();
@@ -358,6 +385,179 @@
     rangeErrors = errors;
   }
 
+  // ===== Batch Mode Functions =====
+  async function selectBatchFiles() {
+    try {
+      const selected = await open({
+        multiple: true,
+        filters: [{ name: 'PDF', extensions: ['pdf'] }]
+      });
+      
+      if (selected && Array.isArray(selected)) {
+        // Append files instead of replacing
+        for (const filePath of selected) {
+          // Check if already exists
+          if (batchFiles.some(f => f.path === filePath)) {
+            continue;
+          }
+          const fileName = filePath.split(/[/\\]/).pop() || filePath;
+          batchFiles = [...batchFiles, {
+            path: filePath,
+            name: fileName,
+            pageCount: 0
+          }];
+        }
+        
+        // Load page counts for new files
+        await loadBatchPageCounts();
+      }
+    } catch (err) {
+      console.error('Failed to select files:', err);
+      statusMessage = `选择文件失败: ${err}`;
+    }
+  }
+
+  async function loadBatchPageCounts() {
+    isLoadingPageCount = true;
+    let minPages = Infinity;
+    
+    try {
+      for (let i = 0; i < batchFiles.length; i++) {
+        if (batchFiles[i].pageCount > 0) continue; // Already loaded
+        
+        const response = await invoke<FilePreviewResponse>('pdf_get_file_preview', {
+          file: batchFiles[i].path,
+          zoom: 0.1
+        });
+        
+        if (response.success && response.page_count) {
+          batchFiles[i].pageCount = response.page_count;
+          minPages = Math.min(minPages, response.page_count);
+        } else {
+          batchFiles[i].pageCount = 0;
+        }
+      }
+      
+      minPageCount = minPages === Infinity ? 0 : minPages;
+    } catch (err) {
+      console.error('Failed to load page counts:', err);
+    } finally {
+      isLoadingPageCount = false;
+    }
+  }
+
+  function removeBatchFile(index: number) {
+    batchFiles = batchFiles.filter((_, i) => i !== index);
+    minPageCount = batchFiles.length > 0 
+      ? Math.min(...batchFiles.map(f => f.pageCount))
+      : 0;
+  }
+
+  async function batchSplitFiles() {
+    if (batchFiles.length === 0) {
+      statusMessage = '请选择要分拆的文件';
+      return;
+    }
+    
+    // Validate
+    if (splitMode === 'range') {
+      if (ranges.length === 0) {
+        statusMessage = '请至少添加一个页码范围';
+        return;
+      }
+      if (rangeErrors.size > 0) {
+        statusMessage = '请修正页码范围错误';
+        return;
+      }
+      for (const [start, end] of ranges) {
+        if (minPageCount > 0 && end > minPageCount) {
+          statusMessage = `范围结束页 ${end} 超过最小文件页数 ${minPageCount}`;
+          return;
+        }
+      }
+    } else if (splitMode === 'extract') {
+      if (selectedPages.size === 0) {
+        statusMessage = '请选择要提取的页面';
+        return;
+      }
+      for (const page of selectedPages) {
+        if (minPageCount > 0 && page > minPageCount) {
+          statusMessage = `页码 ${page} 超过最小文件页数 ${minPageCount}`;
+          return;
+        }
+      }
+    }
+    
+    // Select output directory
+    let outputDir: string | null = null;
+    try {
+      const selected = await open({
+        directory: true,
+        multiple: false
+      });
+      
+      if (!selected || typeof selected !== 'string') {
+        return;
+      }
+      outputDir = selected;
+    } catch (err) {
+      console.error('Failed to select directory:', err);
+      statusMessage = `选择目录失败: ${err}`;
+      return;
+    }
+    
+    isProcessing = true;
+    statusMessage = '开始批量分拆...';
+    
+    try {
+      const files = batchFiles.map(f => f.path);
+      let options: Record<string, unknown> = {};
+      
+      if (splitMode === 'range') {
+        options = { ranges, prefix: '' };
+      } else if (splitMode === 'fixed') {
+        options = { pages_per_file: pagesPerFile, prefix: '' };
+      } else if (splitMode === 'extract') {
+        const pages = Array.from(selectedPages).sort((a, b) => a - b);
+        options = { pages, prefix: '' };
+      }
+      
+      const response = await invoke<BatchSplitResponse>('pdf_batch_split', {
+        files,
+        outputDir,
+        mode: splitMode,
+        options
+      });
+      
+      if (response.success) {
+        statusMessage = `批量分拆成功！成功: ${response.success_count} 个，失败: ${response.failed_count} 个`;
+        
+        if (response.failed_count > 0 && response.results) {
+          const failedNames = response.results
+            .filter(r => !r.success)
+            .map(r => r.file.split(/[/\\]/).pop());
+          console.log('失败的文件:', failedNames);
+        }
+        
+        // Reset state
+        batchFiles = [];
+        minPageCount = 0;
+        selectedPages = new Set();
+        ranges = [];
+        rangeErrors = new Map();
+        pagesToExtract = '';
+      } else {
+        statusMessage = `批量分拆失败: ${response.error || '未知错误'}`;
+      }
+    } catch (err) {
+      console.error('批量分拆失败:', err);
+      statusMessage = `批量分拆失败: ${err}`;
+    } finally {
+      isProcessing = false;
+    }
+  }
+
+
   async function splitFile() {
     if (!inputFile) {
       statusMessage = '请选择输入文件';
@@ -447,38 +647,114 @@
     <p class="text-gray-600 mt-2">将PDF文件分拆为多个文件</p>
   </div>
   
-  <!-- Step 1: File Selection -->
-  <div class="bg-white rounded-lg shadow-sm p-6 mb-6">
-    <h2 class="text-lg font-semibold text-gray-700 mb-4">1. 选择PDF文件</h2>
-    <button
-      onclick={selectFile}
-      class="w-full px-4 py-3 border-2 border-dashed border-gray-300 rounded-lg hover:border-blue-500 hover:bg-blue-50 transition-colors"
-    >
-      {#if inputFile}
-        <div class="flex items-center justify-center gap-3">
-          <svg class="w-6 h-6 text-red-500" fill="currentColor" viewBox="0 0 20 20">
-            <path fill-rule="evenodd" d="M4 4a2 2 0 012-2h4.586A1 1 0 0112.293.707L15.293 5H12a1 1 0 00-1 1v1h.5a.5.5 0 01.5.5v.5h.5a.5.5 0 01.5.5v.5h.5a.5.5 0 01.5.5v3a2 2 0 01-2 2H6a2 2 0 01-2-2V6z" clip-rule="evenodd" />
-          </svg>
-          <span class="text-gray-700 truncate">{inputFile.name}</span>
-          {#if isLoadingPageCount}
-            <span class="text-xs text-gray-400">获取页数中...</span>
-          {:else if totalPages > 0}
-            <span class="text-xs text-blue-600 font-medium bg-blue-50 px-2 py-0.5 rounded-full">共 {totalPages} 页</span>
-          {/if}
-        </div>
-      {:else}
-        <div class="text-center py-4">
-          <svg class="w-12 h-12 mx-auto mb-2 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-          </svg>
-          <p class="text-gray-500 text-sm">点击选择PDF文件</p>
-        </div>
-      {/if}
-    </button>
+  <!-- Mode Toggle -->
+  <div class="bg-white rounded-lg shadow-sm p-4 mb-6">
+    <div class="flex gap-2">
+      <button
+        onclick={() => { isBatchMode = false; batchFiles = []; minPageCount = 0; }}
+        class="flex-1 py-2 px-4 rounded-lg font-medium transition-colors {!isBatchMode ? 'bg-blue-500 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}"
+      >
+        单文件模式
+      </button>
+      <button
+        onclick={() => { isBatchMode = true; inputFile = null; }}
+        class="flex-1 py-2 px-4 rounded-lg font-medium transition-colors {isBatchMode ? 'bg-blue-500 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}"
+      >
+        批量模式
+      </button>
+    </div>
   </div>
+  
+  {#if isBatchMode}
+    <!-- Batch Mode File Selection -->
+    <div class="bg-white rounded-lg shadow-sm p-6 mb-6">
+      <h2 class="text-lg font-semibold text-gray-700 mb-4">1. 选择PDF文件（批量）</h2>
+      <button
+        onclick={selectBatchFiles}
+        class="w-full px-4 py-3 border-2 border-dashed border-gray-300 rounded-lg hover:border-blue-500 hover:bg-blue-50 transition-colors"
+      >
+        {#if batchFiles.length === 0}
+          <div class="text-center py-4">
+            <svg class="w-12 h-12 mx-auto mb-2 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+            </svg>
+            <p class="text-gray-500 text-sm">点击选择多个PDF文件</p>
+          </div>
+        {:else}
+          <div class="text-center py-2">
+            <p class="text-blue-600 font-medium">已选择 {batchFiles.length} 个文件</p>
+            <p class="text-xs text-gray-400 mt-1">点击继续添加更多文件</p>
+          </div>
+        {/if}
+      </button>
+      
+      <!-- Batch File List -->
+      {#if batchFiles.length > 0}
+        <div class="mt-4 space-y-2 max-h-60 overflow-y-auto">
+          {#each batchFiles as file, index}
+            <div class="flex items-center gap-3 p-2 bg-gray-50 rounded-lg">
+              <svg class="w-5 h-5 text-red-500 shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                <path fill-rule="evenodd" d="M4 4a2 2 0 012-2h4.586A1 1 0 0112.293.707L15.293 5H12a1 1 0 00-1 1v1h.5a.5.5 0 01.5.5v.5h.5a.5.5 0 01.5.5v.5h.5a.5.5 0 01.5.5v3a2 2 0 01-2 2H6a2 2 0 01-2-2V6z" clip-rule="evenodd" />
+              </svg>
+              <span class="flex-1 text-sm text-gray-700 truncate">{file.name}</span>
+              {#if isLoadingPageCount && file.pageCount === 0}
+                <span class="text-xs text-gray-400">加载中...</span>
+              {:else if file.pageCount > 0}
+                <span class="text-xs text-blue-600 font-medium">{file.pageCount} 页</span>
+              {/if}
+              <button
+                onclick={() => removeBatchFile(index)}
+                class="text-red-500 hover:text-red-700 text-sm hover:bg-red-50 rounded px-2 py-1"
+              >
+                删除
+              </button>
+            </div>
+          {/each}
+        </div>
+        {#if minPageCount > 0}
+          <p class="mt-3 text-sm text-amber-600 flex items-center gap-1">
+            <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+              <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
+            </svg>
+            最小文件页数: {minPageCount} 页 (分拆范围将受此限制)
+          </p>
+        {/if}
+      {/if}
+    </div>
+  {:else}
+    <!-- Single File Selection -->
+    <div class="bg-white rounded-lg shadow-sm p-6 mb-6">
+      <h2 class="text-lg font-semibold text-gray-700 mb-4">1. 选择PDF文件</h2>
+      <button
+        onclick={selectFile}
+        class="w-full px-4 py-3 border-2 border-dashed border-gray-300 rounded-lg hover:border-blue-500 hover:bg-blue-50 transition-colors"
+      >
+        {#if inputFile}
+          <div class="flex items-center justify-center gap-3">
+            <svg class="w-6 h-6 text-red-500" fill="currentColor" viewBox="0 0 20 20">
+              <path fill-rule="evenodd" d="M4 4a2 2 0 012-2h4.586A1 1 0 0112.293.707L15.293 5H12a1 1 0 00-1 1v1h.5a.5.5 0 01.5.5v.5h.5a.5.5 0 01.5.5v.5h.5a.5.5 0 01.5.5v3a2 2 0 01-2 2H6a2 2 0 01-2-2V6z" clip-rule="evenodd" />
+            </svg>
+            <span class="text-gray-700 truncate">{inputFile.name}</span>
+            {#if isLoadingPageCount}
+              <span class="text-xs text-gray-400">获取页数中...</span>
+            {:else if totalPages > 0}
+              <span class="text-xs text-blue-600 font-medium bg-blue-50 px-2 py-0.5 rounded-full">共 {totalPages} 页</span>
+            {/if}
+          </div>
+        {:else}
+          <div class="text-center py-4">
+            <svg class="w-12 h-12 mx-auto mb-2 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+            </svg>
+            <p class="text-gray-500 text-sm">点击选择PDF文件</p>
+          </div>
+        {/if}
+      </button>
+    </div>
+  {/if}
 
   <!-- Step 2: Split Mode -->
-  {#if inputFile}
+  {#if inputFile || (isBatchMode && batchFiles.length > 0)}
     <div class="bg-white rounded-lg shadow-sm p-6 mb-6">
       <h2 class="text-lg font-semibold text-gray-700 mb-4">2. 选择分拆模式</h2>
       <div class="space-y-3">
@@ -496,13 +772,23 @@
             <p class="text-sm text-gray-500">每隔N页生成一个文件</p>
           </div>
         </label>
-        <label class="flex items-center gap-3 cursor-pointer p-3 rounded-lg hover:bg-gray-50 transition-colors {splitMode === 'extract' ? 'bg-blue-50 ring-1 ring-blue-200' : ''}">
-          <input type="radio" bind:group={splitMode} value="extract" name="splitMode" class="w-4 h-4" onchange={() => onSplitModeChange('extract')} />
-          <div>
-            <span class="text-gray-700 font-medium">提取选中页面</span>
-            <p class="text-sm text-gray-500">通过预览选择需要的页面，生成单个文件</p>
-          </div>
-        </label>
+        {#if !isBatchMode}
+          <label class="flex items-center gap-3 cursor-pointer p-3 rounded-lg hover:bg-gray-50 transition-colors {splitMode === 'extract' ? 'bg-blue-50 ring-1 ring-blue-200' : ''}">
+            <input type="radio" bind:group={splitMode} value="extract" name="splitMode" class="w-4 h-4" onchange={() => onSplitModeChange('extract')} />
+            <div>
+              <span class="text-gray-700 font-medium">提取选中页面</span>
+              <p class="text-sm text-gray-500">通过预览选择需要的页面，生成单个文件</p>
+            </div>
+          </label>
+        {:else}
+          <label class="flex items-center gap-3 cursor-pointer p-3 rounded-lg hover:bg-gray-50 transition-colors {splitMode === 'extract' ? 'bg-blue-50 ring-1 ring-blue-200' : ''}">
+            <input type="radio" bind:group={splitMode} value="extract" name="splitMode" class="w-4 h-4" onchange={() => onSplitModeChange('extract')} />
+            <div>
+              <span class="text-gray-700 font-medium">提取特定页码</span>
+              <p class="text-sm text-gray-500">输入要提取的页码，从每个文件提取相同页面</p>
+            </div>
+          </label>
+        {/if}
       </div>
       
       <!-- Range Mode Options -->
@@ -510,7 +796,9 @@
         <div class="mt-4 pt-4 border-t">
           <div class="flex items-center justify-between mb-3">
             <h3 class="text-sm font-medium text-gray-600">页码范围设置</h3>
-            {#if totalPages > 0}
+            {#if isBatchMode && minPageCount > 0}
+              <span class="text-xs text-amber-600">最小文件页数: {minPageCount} 页</span>
+            {:else if totalPages > 0}
               <span class="text-xs text-gray-400">文档共 {totalPages} 页</span>
             {/if}
           </div>
@@ -518,22 +806,22 @@
             {#each ranges as range, index}
               <div class="flex items-center gap-2 flex-wrap">
                 <span class="text-xs text-gray-400 w-12 shrink-0">范围 {index + 1}</span>
-                <input 
-                  type="number" 
-                  bind:value={range[0]} 
-                  min="1" 
-                  max={totalPages || undefined}
-                  class="w-20 px-2 py-1 border rounded text-sm {rangeErrors.get(index) ? 'border-red-500 bg-red-50' : ''}" 
+                <input
+                  type="number"
+                  bind:value={range[0]}
+                  min="1"
+                  max={isBatchMode ? minPageCount : totalPages || undefined}
+                  class="w-20 px-2 py-1 border rounded text-sm {rangeErrors.get(index) ? 'border-red-500 bg-red-50' : ''}"
                   placeholder="开始页"
                   onchange={() => validateRange(index)}
                 />
                 <span class="text-gray-400">-</span>
-                <input 
-                  type="number" 
-                  bind:value={range[1]} 
-                  min="1" 
-                  max={totalPages || undefined}
-                  class="w-20 px-2 py-1 border rounded text-sm {rangeErrors.get(index) ? 'border-red-500 bg-red-50' : ''}" 
+                <input
+                  type="number"
+                  bind:value={range[1]}
+                  min="1"
+                  max={isBatchMode ? minPageCount : totalPages || undefined}
+                  class="w-20 px-2 py-1 border rounded text-sm {rangeErrors.get(index) ? 'border-red-500 bg-red-50' : ''}"
                   placeholder="结束页"
                   onchange={() => validateRange(index)}
                 />
@@ -543,8 +831,8 @@
                 {:else}
                   <span class="text-xs text-gray-400 flex-1">({range[1] - range[0] + 1} 页)</span>
                 {/if}
-                <button 
-                  onclick={() => removeRange(index)} 
+                <button
+                  onclick={() => removeRange(index)}
                   class="text-red-500 hover:text-red-700 px-2 py-1 text-sm hover:bg-red-50 rounded"
                 >
                   删除
@@ -580,21 +868,23 @@
         <div class="mt-4 pt-4 border-t">
           <div class="flex items-center justify-between mb-3">
             <h3 class="text-sm font-medium text-gray-600">固定页数设置</h3>
-            {#if totalPages > 0}
+            {#if isBatchMode && minPageCount > 0}
+              <span class="text-xs text-amber-600">最小文件页数: {minPageCount} 页</span>
+            {:else if totalPages > 0}
               <span class="text-xs text-gray-400">文档共 {totalPages} 页</span>
             {/if}
           </div>
           <div class="flex items-center gap-2">
             <span class="text-sm text-gray-600">每个文件包含：</span>
-            <input 
-              type="number" 
-              bind:value={pagesPerFile} 
-              min="1" 
-              max={totalPages || undefined}
-              class="w-24 px-3 py-1 border rounded text-sm" 
+            <input
+              type="number"
+              bind:value={pagesPerFile}
+              min="1"
+              max={isBatchMode ? minPageCount : totalPages || undefined}
+              class="w-24 px-3 py-1 border rounded text-sm"
             />
             <span class="text-sm text-gray-600">页</span>
-            {#if totalPages > 0 && pagesPerFile > 0}
+            {#if !isBatchMode && totalPages > 0 && pagesPerFile > 0}
               <span class="text-xs text-blue-600 bg-blue-50 px-2 py-0.5 rounded">
                 将生成 {Math.ceil(totalPages / pagesPerFile)} 个文件
               </span>
@@ -604,27 +894,42 @@
       {:else if splitMode === 'extract'}
         <div class="mt-4 pt-4 border-t">
           <div class="flex items-center justify-between mb-3">
-            <h3 class="text-sm font-medium text-gray-600">提取页面设置</h3>
-            {#if totalPages > 0}
+            <h3 class="text-sm font-medium text-gray-600">{isBatchMode ? '提取页面设置' : '提取页面设置'}</h3>
+            {#if isBatchMode && minPageCount > 0}
+              <span class="text-xs text-amber-600">最小文件页数: {minPageCount} 页</span>
+            {:else if totalPages > 0}
               <span class="text-xs text-gray-400">文档共 {totalPages} 页</span>
             {/if}
           </div>
-          {#if selectedPages.size > 0}
-            <p class="text-sm text-green-600 mb-2 flex items-center gap-1">
-              <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
-                <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd" />
-              </svg>
-              已选择 {selectedPages.size} 个页面
-            </p>
+          {#if !isBatchMode}
+            {#if selectedPages.size > 0}
+              <p class="text-sm text-green-600 mb-2 flex items-center gap-1">
+                <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                  <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd" />
+                </svg>
+                已选择 {selectedPages.size} 个页面
+              </p>
+            {:else}
+              <p class="text-sm text-gray-500 mb-2">请在下方预览中点击选择要提取的页面</p>
+            {/if}
           {:else}
-            <p class="text-sm text-gray-500 mb-2">请在下方预览中点击选择要提取的页面</p>
+            {#if selectedPages.size > 0}
+              <p class="text-sm text-green-600 mb-2 flex items-center gap-1">
+                <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                  <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd" />
+                </svg>
+                已选择 {selectedPages.size} 个页面: {Array.from(selectedPages).sort((a, b) => a - b).join(', ')}
+              </p>
+            {:else}
+              <p class="text-sm text-gray-500 mb-2">请输入要提取的页码</p>
+            {/if}
           {/if}
           <input
             type="text"
             bind:value={pagesToExtract}
             onkeyup={onPagesInputKeyup}
             class="w-full px-3 py-2 border rounded text-sm"
-            placeholder="或直接输入页码，如: 1,3,5,7-10"
+            placeholder="输入页码，如: 1,3,5,7-10"
           />
         </div>
       {/if}
@@ -722,15 +1027,29 @@
   {/if}
 
   <!-- Split Button -->
-  <button
-    onclick={splitFile}
-    disabled={!inputFile || isProcessing || (splitMode === 'extract' && selectedPages.size === 0) || (splitMode === 'range' && (ranges.length === 0 || rangeErrors.size > 0))}
-    class="px-6 py-3 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed font-medium"
-  >
-    {#if isProcessing}
-      处理中...
-    {:else}
-      开始分拆
-    {/if}
-  </button>
+  {#if isBatchMode}
+    <button
+      onclick={batchSplitFiles}
+      disabled={batchFiles.length === 0 || isProcessing || (splitMode === 'range' && (ranges.length === 0 || rangeErrors.size > 0)) || (splitMode === 'extract' && selectedPages.size === 0)}
+      class="px-6 py-3 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed font-medium"
+    >
+      {#if isProcessing}
+        处理中...
+      {:else}
+        开始批量分拆
+      {/if}
+    </button>
+  {:else}
+    <button
+      onclick={splitFile}
+      disabled={!inputFile || isProcessing || (splitMode === 'extract' && selectedPages.size === 0) || (splitMode === 'range' && (ranges.length === 0 || rangeErrors.size > 0))}
+      class="px-6 py-3 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed font-medium"
+    >
+      {#if isProcessing}
+        处理中...
+      {:else}
+        开始分拆
+      {/if}
+    </button>
+  {/if}
 </div>

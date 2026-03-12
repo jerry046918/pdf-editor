@@ -124,13 +124,14 @@ def main():
     server = JSONRPCServer()
     
     # Import and register handlers
-    from src.handlers import merge, split, convert, edit, thumbnails
+    from src.handlers import merge, split, convert, edit, thumbnails, batch_split
     
     merge.register(server)
     split.register(server)
     convert.register(server)
     edit.register(server)
     thumbnails.register(server)
+    batch_split.register(server)
     server.run()
 
 

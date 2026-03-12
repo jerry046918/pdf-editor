@@ -50,6 +50,18 @@
 - 自动生成输出文件名（如：`test.pdf` → `test_split_1.pdf`）
 - 点击分拆后自动弹出目录选择对话框
 
+#### 📦 批量分拆
+除了单文件分拆外，还支持批量模式：
+- **批量选择**：同时选择多个PDF文件
+- **相同设置**：对所有文件应用相同的分拆规则
+- **三种模式支持**：
+  - 按页码范围分拆
+  - 按固定页数分拆
+  - 提取特定页码（输入页码，如1,3,5-10）
+- **智能限制**：分拆范围自动限制为最小文件的页数
+- **进度显示**：实时显示处理进度
+- **错误处理**：部分文件失败不影响其他文件处理
+
 #### 🖼️ 图片转PDF
 - 支持JPG、PNG、BMP、TIFF、WebP、GIF格式
 - 批量添加多张图片
@@ -107,20 +119,20 @@
 │  │  └─────────┴─────────┴──────────┴─────────┘                ││
 │  └─────────────────────────────────────────────────────────────┘│
 └─────────────────────────────────────────────────────────────────┘
-                           ↕ Tauri IPC (invoke/events)
+                          ↕ Tauri IPC (invoke/events)
 ┌─────────────────────────────────────────────────────────────────┐
 │                  后端层 (Rust Main Process)                      │
 │  ┌─────────────────────────────────────────────────────────────┐│
 │  │  Tauri 2.x Plugins: dialog, fs, shell                       ││
-│  │  Commands: pdf_merge, pdf_split, pdf_convert_images, etc.   ││
+│  │  Commands: pdf_merge, pdf_split, pdf_batch_split, etc.      ││
 │  └─────────────────────────────────────────────────────────────┘│
 └─────────────────────────────────────────────────────────────────┘
-                           ↕ JSON-RPC 2.0 (stdio)
+                          ↕ JSON-RPC 2.0 (stdio)
 ┌─────────────────────────────────────────────────────────────────┐
 │               PDF处理层 (Python Sidecar)                         │
 │  ┌─────────────────────────────────────────────────────────────┐│
 │  │  PyMuPDF 1.24+ (fitz) - PDF Operations                       ││
-│  │  Handlers: merge, split, convert, edit, thumbnails          ││
+│  │  Handlers: merge, split, batch_split, convert, thumbnails   ││
 │  └─────────────────────────────────────────────────────────────┘│
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -128,7 +140,6 @@
 ---
 
 ## 安装与分发
-
 
 ### 🚀 快速开始
 
@@ -156,7 +167,18 @@
 
 ### 安装步骤
 
-1. **克隆仓库**
+```bash
+# 克隆仓库
+git clone https://github.com/fanjiayu/pdf-editor.git
+cd pdf-editor
+
+# 安装前端依赖
+pnpm install
+
+# 安装Python依赖
+pip install -r pdf-sidecar/requirements.txt
+```
+
 ---
 
 ## 开发
@@ -216,20 +238,19 @@ pdf-editor/
 │   │   ├── main.rs            # 入口点
 │   │   ├── lib.rs             # Tauri命令
 │   │   └── sidecar/mod.rs     # JSON-RPC客户端
+│   ├── binaries/               # Sidecar可执行文件
 │   ├── Cargo.toml
-│   ├── tauri.conf.json
-│   └── capabilities/default.json
+│   └── tauri.conf.json
 ├── pdf-sidecar/                # Python PDF处理器
 │   ├── src/
 │   │   ├── __main__.py        # JSON-RPC服务器入口
-│   │   ├── core/pdf_ops.py    # 工具函数
-│   │   ├── handlers/
-│   │   │   ├── merge.py       # pdf.merge
-│   │   │   ├── split.py       # pdf.split
-│   │   │   ├── convert.py     # pdf.convert_images
-│   │   │   ├── edit.py        # pdf.edit_text
-│   │   │   └── thumbnails.py  # pdf.get_thumbnails, pdf.get_file_preview
-│   │   └── utils/temp.py
+│   │   └── handlers/
+│   │       ├── merge.py       # pdf.merge
+│   │       ├── split.py       # pdf.split
+│   │       ├── batch_split.py # pdf.batch_split
+│   │       ├── convert.py     # pdf.convert_images
+│   │       ├── edit.py        # pdf.edit_text
+│   │       └── thumbnails.py  # pdf.get_thumbnails
 │   └── requirements.txt
 └── static/
 ```
@@ -244,12 +265,11 @@ pdf-editor/
 |------|--------|------|
 | `pdf.merge` | merge.py | 合并多个PDF |
 | `pdf.split` | split.py | 分拆PDF（range/fixed/extract模式）|
+| `pdf.batch_split` | batch_split.py | 批量分拆多个PDF |
 | `pdf.convert_images` | convert.py | 图片转PDF |
 | `pdf.edit_text` | edit.py | 编辑PDF文字 |
 | `pdf.get_thumbnails` | thumbnails.py | 生成页面缩略图 |
 | `pdf.get_file_preview` | thumbnails.py | 生成首页预览 |
-| `system.ping` | __main__.py | 健康检查 |
-| `system.info` | __main__.py | 系统信息 |
 
 ### Tauri命令（IPC接口）
 
@@ -273,6 +293,7 @@ pdf-editor/
 ### Python Sidecar
 - **响应格式**: `{'success': bool, ...}` 或 `{'success': False, 'error': str}`
 - **页面索引**: 参数使用1-based，PyMuPDF使用0-based
+- **资源管理**: 使用 `with fitz.open()` 上下文管理器确保资源释放
 - **日志**: `logging.getLogger(__name__)` 输出到stderr
 
 ### 文件命名规则
@@ -285,11 +306,12 @@ pdf-editor/
 ## 已知问题
 
 - [ ] 书签分拆模式未实现（`split.py`）
-- [ ] CSP已禁用（安全性待加强）
+- [x] ~~CSP已禁用~~ ✅ 已启用CSP安全策略
 - [ ] PyMuPDF AGPL-3.0许可证兼容性检查
 - [x] ~~Sidecar未配置打包~~ ✅ 已完成
 - [ ] 无单元/集成测试
 - [ ] 无CI/CD流程
+
 ---
 
 ## 许可证

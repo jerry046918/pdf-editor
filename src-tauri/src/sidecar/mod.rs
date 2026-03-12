@@ -54,28 +54,82 @@ impl SidecarManager {
         // Kill existing process if any
         self.stop()?;
         
-        let sidecar_path = get_sidecar_path()?;
-        
-        #[cfg(windows)]
+        // In development mode, use Python directly
+        #[cfg(debug_assertions)]
         let mut child = {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x08000000;
-            Command::new(&sidecar_path)
-                .creation_flags(CREATE_NO_WINDOW)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .map_err(|e| format!("Failed to spawn sidecar '{}': {}", sidecar_path.display(), e))?
+            // Find pdf-sidecar directory
+            let exe_dir = std::env::current_exe()
+                .map_err(|e| format!("Failed to get exe path: {}", e))?
+                .parent().ok_or("Failed to get exe directory")?
+                .to_path_buf();
+            
+            let mut sidecar_dir = exe_dir.clone();
+            for _ in 0..10 {
+                let test_path = sidecar_dir.join("pdf-sidecar").join("src").join("__main__.py");
+                if test_path.exists() {
+                    break;
+                }
+                sidecar_dir = sidecar_dir.parent()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| sidecar_dir.clone());
+            }
+            
+            let python_path = sidecar_dir.join("pdf-sidecar").join("src");
+            
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                const CREATE_NO_WINDOW: u32 = 0x08000000;
+                Command::new("python")
+                    .arg("-m").arg("src")
+                    .current_dir(&python_path.parent().unwrap_or(&sidecar_dir))
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .map_err(|e| format!("Failed to spawn Python sidecar: {}", e))?
+            }
+            #[cfg(not(windows))]
+            {
+                Command::new("python3")
+                    .arg("-m").arg("src")
+                    .current_dir(&python_path.parent().unwrap_or(&sidecar_dir))
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .map_err(|e| format!("Failed to spawn Python sidecar: {}", e))?
+            }
         };
         
-        #[cfg(not(windows))]
-        let mut child = Command::new(&sidecar_path)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("Failed to spawn sidecar '{}': {}", sidecar_path.display(), e))?;
+        // In production mode, use compiled executable
+        #[cfg(not(debug_assertions))]
+        let mut child = {
+            let sidecar_path = get_sidecar_path()?;
+            
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                const CREATE_NO_WINDOW: u32 = 0x08000000;
+                Command::new(&sidecar_path)
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .map_err(|e| format!("Failed to spawn sidecar '{}': {}", sidecar_path.display(), e))?
+            }
+            #[cfg(not(windows))]
+            {
+                Command::new(&sidecar_path)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .map_err(|e| format!("Failed to spawn sidecar '{}': {}", sidecar_path.display(), e))?
+            }
+        };
         
         let stdin = child.stdin.take().ok_or("Failed to get stdin")?;
         let stdout = child.stdout.take().ok_or("Failed to get stdout")?;

@@ -1,5 +1,5 @@
 """Handlers Package"""
 
-from . import merge, split, convert, edit
+from . import merge, split, convert, edit, thumbnails, batch_split
 
-__all__ = ['merge', 'split', 'convert', 'edit']
+__all__ = ['merge', 'split', 'convert', 'edit', 'thumbnails', 'batch_split']

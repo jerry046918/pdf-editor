@@ -20,6 +20,29 @@ struct PdfResponse {
     total_files: Option<usize>,
 }
 
+/// Batch split result for a single file
+#[derive(serde::Deserialize, serde::Serialize)]
+struct BatchSplitResult {
+    file: String,
+    success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_files: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+/// Batch split response
+#[derive(serde::Deserialize, serde::Serialize)]
+struct BatchSplitResponse {
+    success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    results: Vec<BatchSplitResult>,
+    total_files: usize,
+    success_count: usize,
+    failed_count: usize,
+}
+
 /// Merge multiple PDF files into one
 #[tauri::command]
 fn pdf_merge(files: Vec<String>, output: String) -> Result<PdfResponse, String> {
@@ -46,6 +69,22 @@ fn pdf_split(file: String, output_dir: String, mode: String, options: serde_json
     
     let result = call_sidecar("pdf.split", params)?;
     let response: PdfResponse = serde_json::from_value(result)
+        .map_err(|e| format!("Failed to parse response: {}", e))?;
+    Ok(response)
+}
+
+/// Batch split multiple PDF files with the same settings
+#[tauri::command]
+fn pdf_batch_split(files: Vec<String>, output_dir: String, mode: String, options: serde_json::Value) -> Result<BatchSplitResponse, String> {
+    let params = serde_json::json!({
+        "files": files,
+        "output_dir": output_dir,
+        "mode": mode,
+        "options": options,
+    });
+    
+    let result = call_sidecar("pdf.batch_split", params)?;
+    let response: BatchSplitResponse = serde_json::from_value(result)
         .map_err(|e| format!("Failed to parse response: {}", e))?;
     Ok(response)
 }
@@ -177,6 +216,7 @@ pub fn run() {
             greet,
             pdf_merge,
             pdf_split,
+            pdf_batch_split,
             pdf_convert_images,
             pdf_edit_text,
             test_sidecar,

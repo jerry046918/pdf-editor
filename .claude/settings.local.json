@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd \"D:\\\\playground\\\\pdf-editor\\\\pdf-sidecar\" && python -m py_compile src/handlers/merge.py src/handlers/split.py src/handlers/convert.py src/handlers/edit.py src/handlers/thumbnails.py src/handlers/batch_split.py)",
+      "Bash(cd \"D:\\\\playground\\\\pdf-editor\" && pnpm check 2>&1 | head -50)",
+      "Bash(cd \"D:\\\\playground\\\\pdf-editor\" && pnpm check 2>&1 | head -20)",
+      "Bash(cd \"D:\\\\playground\\\\pdf-editor\\\\src-tauri\" && cargo check 2>&1 | tail -20)",
+      "Bash(cd \"D:\\\\playground\\\\pdf-editor\" && pnpm check 2>&1 | tail -15)",
+      "Bash(cd \"D:\\\\playground\\\\pdf-editor\" && pnpm check 2>&1 | tail -10)",
+      "Bash(cd \"D:\\\\playground\\\\pdf-editor\\\\static\" && rm -f svelte.svg vite.svg tauri.svg && ls -la)"
+    ]
+  }
+}
