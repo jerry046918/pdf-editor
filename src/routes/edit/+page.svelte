@@ -203,7 +203,8 @@
       type: 'replace',
       page: match.page,
       search: match.text,
-      replace: replaceText
+      replace: replaceText,
+      bbox: match.bbox  // Pass bbox for precise positioning - only replace this specific instance
       // No font settings - backend will auto-detect from original text
     };
 
@@ -225,7 +226,8 @@
           type: 'replace',
           page: match.page,
           search: match.text,
-          replace: replaceText
+          replace: replaceText,
+          bbox: match.bbox  // Pass bbox for precise positioning
           // No font settings - backend will auto-detect from original text
         });
       }
@@ -243,7 +245,8 @@
     const operation: EditOperation = {
       type: 'delete',
       page: match.page,
-      search: match.text
+      search: match.text,
+      bbox: match.bbox  // Pass bbox for precise positioning - only delete this specific instance
     };
 
     pendingOperations = [...pendingOperations, operation];
@@ -263,7 +266,8 @@
         operations.push({
           type: 'delete',
           page: match.page,
-          search: match.text
+          search: match.text,
+          bbox: match.bbox  // Pass bbox for precise positioning
         });
       }
     });
