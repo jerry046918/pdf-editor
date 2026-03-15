@@ -35,11 +35,45 @@ export interface EditOperation {
   replace?: string;
   text?: string;
   position?: [number, number];
-  font?: {
-    family: string;
-    size: number;
-    color: string;
-  };
+  bbox?: [number, number, number, number];  // For block-based editing: [x0, y0, x1, y1]
+  font?: FontSettings;
+}
+
+// Text editing related types
+export interface TextBlock {
+  id: string;
+  text: string;
+  bbox: [number, number, number, number];
+  page: number;
+  font?: FontSettings;
+}
+
+export interface TextBlocksResponse {
+  success: boolean;
+  error?: string;
+  blocks?: TextBlock[];
+  page_width?: number;
+  page_height?: number;
+}
+
+export interface TextMatch {
+  page: number;
+  text: string;
+  bbox: [number, number, number, number];
+  context: string;
+}
+
+export interface TextSearchResponse {
+  success: boolean;
+  error?: string;
+  matches?: TextMatch[];
+  total_matches?: number;
+}
+
+export interface FontSettings {
+  family: string;
+  size: number;
+  color: string;
 }
 
 // 批量分拆相关类型

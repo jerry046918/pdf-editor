@@ -173,6 +173,77 @@ struct FilePreviewResponse {
     title: Option<String>,
 }
 
+/// Page preview response for specific page
+#[derive(serde::Deserialize, serde::Serialize)]
+struct PagePreviewResponse {
+    success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    image: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    width: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    height: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    page_width: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    page_height: Option<f32>,
+}
+
+/// Font settings for text
+#[derive(serde::Deserialize, serde::Serialize, Clone)]
+struct FontSettings {
+    family: String,
+    size: f32,
+    color: String,
+}
+
+/// Text block for text editing
+#[derive(serde::Deserialize, serde::Serialize)]
+struct TextBlock {
+    id: String,
+    text: String,
+    bbox: Vec<f32>,
+    page: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    font: Option<FontSettings>,
+}
+
+/// Response for text blocks extraction
+#[derive(serde::Deserialize, serde::Serialize)]
+struct TextBlocksResponse {
+    success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    blocks: Option<Vec<TextBlock>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    page_width: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    page_height: Option<f32>,
+}
+
+/// Text match for search
+#[derive(serde::Deserialize, serde::Serialize)]
+struct TextMatch {
+    page: usize,
+    text: String,
+    bbox: (f32, f32, f32, f32),
+    context: String,
+}
+
+/// Response for text search
+#[derive(serde::Deserialize, serde::Serialize)]
+struct TextSearchResponse {
+    success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    matches: Option<Vec<TextMatch>>,
+    total_matches: Option<usize>,
+}
+
 /// Get thumbnails for all pages in a PDF file
 #[tauri::command]
 fn pdf_get_thumbnails(file: String, max_pages: Option<usize>, zoom: Option<f32>) -> Result<ThumbnailsResponse, String> {
@@ -195,9 +266,54 @@ fn pdf_get_file_preview(file: String, zoom: Option<f32>) -> Result<FilePreviewRe
         "file": file,
         "zoom": zoom.unwrap_or(0.5),
     });
-    
+
     let result = call_sidecar("pdf.get_file_preview", params)?;
     let response: FilePreviewResponse = serde_json::from_value(result)
+        .map_err(|e| format!("Failed to parse response: {}", e))?;
+    Ok(response)
+}
+
+/// Get preview for a specific page in a PDF file
+#[tauri::command]
+fn pdf_get_page_preview(file: String, page: usize, zoom: Option<f32>) -> Result<PagePreviewResponse, String> {
+    let params = serde_json::json!({
+        "file": file,
+        "page": page,
+        "zoom": zoom.unwrap_or(1.0),
+    });
+
+    let result = call_sidecar("pdf.get_page_preview", params)?;
+    let response: PagePreviewResponse = serde_json::from_value(result)
+        .map_err(|e| format!("Failed to parse response: {}", e))?;
+    Ok(response)
+}
+
+/// Get text blocks from a specific page
+#[tauri::command]
+fn pdf_get_text_blocks(file: String, page: usize) -> Result<TextBlocksResponse, String> {
+    let params = serde_json::json!({
+        "file": file,
+        "page": page,
+    });
+
+    let result = call_sidecar("pdf.get_text_blocks", params)?;
+    let response: TextBlocksResponse = serde_json::from_value(result)
+        .map_err(|e| format!("Failed to parse response: {}", e))?;
+    Ok(response)
+}
+
+/// Search for text in a PDF
+#[tauri::command]
+fn pdf_search_text(file: String, search: String, case_sensitive: Option<bool>, pages: Option<Vec<usize>>) -> Result<TextSearchResponse, String> {
+    let params = serde_json::json!({
+        "file": file,
+        "search": search,
+        "case_sensitive": case_sensitive.unwrap_or(false),
+        "pages": pages,
+    });
+
+    let result = call_sidecar("pdf.search_text", params)?;
+    let response: TextSearchResponse = serde_json::from_value(result)
         .map_err(|e| format!("Failed to parse response: {}", e))?;
     Ok(response)
 }
@@ -221,7 +337,10 @@ pub fn run() {
             pdf_edit_text,
             test_sidecar,
             pdf_get_thumbnails,
-            pdf_get_file_preview
+            pdf_get_file_preview,
+            pdf_get_page_preview,
+            pdf_get_text_blocks,
+            pdf_search_text
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

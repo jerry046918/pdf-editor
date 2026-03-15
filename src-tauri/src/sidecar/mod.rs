@@ -53,7 +53,10 @@ impl SidecarManager {
     pub fn start(&mut self) -> Result<(), String> {
         // Kill existing process if any
         self.stop()?;
-        
+
+        // Get fonts directory path
+        let fonts_dir = get_fonts_dir()?;
+
         // In development mode, use Python directly
         #[cfg(debug_assertions)]
         let mut child = {
@@ -62,7 +65,7 @@ impl SidecarManager {
                 .map_err(|e| format!("Failed to get exe path: {}", e))?
                 .parent().ok_or("Failed to get exe directory")?
                 .to_path_buf();
-            
+
             let mut sidecar_dir = exe_dir.clone();
             for _ in 0..10 {
                 let test_path = sidecar_dir.join("pdf-sidecar").join("src").join("__main__.py");
@@ -73,9 +76,9 @@ impl SidecarManager {
                     .map(|p| p.to_path_buf())
                     .unwrap_or_else(|| sidecar_dir.clone());
             }
-            
+
             let python_path = sidecar_dir.join("pdf-sidecar").join("src");
-            
+
             #[cfg(windows)]
             {
                 use std::os::windows::process::CommandExt;
@@ -83,6 +86,7 @@ impl SidecarManager {
                 Command::new("python")
                     .arg("-m").arg("src")
                     .current_dir(&python_path.parent().unwrap_or(&sidecar_dir))
+                    .env("PDF_EDITOR_FONTS_DIR", &fonts_dir)
                     .creation_flags(CREATE_NO_WINDOW)
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
@@ -95,6 +99,7 @@ impl SidecarManager {
                 Command::new("python3")
                     .arg("-m").arg("src")
                     .current_dir(&python_path.parent().unwrap_or(&sidecar_dir))
+                    .env("PDF_EDITOR_FONTS_DIR", &fonts_dir)
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
@@ -102,17 +107,18 @@ impl SidecarManager {
                     .map_err(|e| format!("Failed to spawn Python sidecar: {}", e))?
             }
         };
-        
+
         // In production mode, use compiled executable
         #[cfg(not(debug_assertions))]
         let mut child = {
             let sidecar_path = get_sidecar_path()?;
-            
+
             #[cfg(windows)]
             {
                 use std::os::windows::process::CommandExt;
                 const CREATE_NO_WINDOW: u32 = 0x08000000;
                 Command::new(&sidecar_path)
+                    .env("PDF_EDITOR_FONTS_DIR", &fonts_dir)
                     .creation_flags(CREATE_NO_WINDOW)
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
@@ -123,6 +129,7 @@ impl SidecarManager {
             #[cfg(not(windows))]
             {
                 Command::new(&sidecar_path)
+                    .env("PDF_EDITOR_FONTS_DIR", &fonts_dir)
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
@@ -232,25 +239,25 @@ fn get_sidecar_path() -> Result<std::path::PathBuf, String> {
     let exe_dir = std::env::current_exe()
         .map_err(|e| format!("Failed to get exe path: {}", e))?;
     let exe_dir = exe_dir.parent().ok_or("Failed to get exe directory")?;
-    
+
     let sidecar_name = if cfg!(windows) {
         "pdf-sidecar-x86_64-pc-windows-msvc.exe"
     } else {
         "pdf-sidecar-x86_64-unknown-linux-gnu"
     };
-    
+
     // Try in the same directory
     let sidecar_path = exe_dir.join(sidecar_name);
     if sidecar_path.exists() {
         return Ok(sidecar_path);
     }
-    
+
     // Try in binaries subdirectory
     let sidecar_path = exe_dir.join("binaries").join(sidecar_name);
     if sidecar_path.exists() {
         return Ok(sidecar_path);
     }
-    
+
     // Try with .exe extension only (PyInstaller default name)
     #[cfg(windows)]
     {
@@ -259,8 +266,52 @@ fn get_sidecar_path() -> Result<std::path::PathBuf, String> {
             return Ok(sidecar_path);
         }
     }
-    
+
     Err("Sidecar executable not found".to_string())
+}
+
+/// Get the fonts directory path
+fn get_fonts_dir() -> Result<std::path::PathBuf, String> {
+    // In development mode, use fonts directory relative to source
+    #[cfg(debug_assertions)]
+    {
+        let exe_dir = std::env::current_exe()
+            .map_err(|e| format!("Failed to get exe path: {}", e))?
+            .parent().ok_or("Failed to get exe directory")?
+            .to_path_buf();
+
+        // Search for src-tauri/fonts directory
+        let mut search_dir = exe_dir.clone();
+        for _ in 0..10 {
+            let fonts_path = search_dir.join("src-tauri").join("fonts");
+            if fonts_path.exists() {
+                return Ok(fonts_path);
+            }
+            search_dir = search_dir.parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| search_dir.clone());
+        }
+
+        // Fallback to relative path
+        Ok(exe_dir.join("fonts"))
+    }
+
+    // In production mode, use fonts directory next to executable
+    #[cfg(not(debug_assertions))]
+    {
+        let exe_dir = std::env::current_exe()
+            .map_err(|e| format!("Failed to get exe path: {}", e))?;
+        let exe_dir = exe_dir.parent().ok_or("Failed to get exe directory")?;
+
+        // Try fonts directory next to executable
+        let fonts_dir = exe_dir.join("fonts");
+        if fonts_dir.exists() {
+            return Ok(fonts_dir);
+        }
+
+        // Fallback
+        Ok(fonts_dir)
+    }
 }
 
 // Global sidecar manager singleton
