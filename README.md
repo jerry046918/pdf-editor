@@ -81,8 +81,30 @@
 - 点击转换后自动弹出保存对话框
 
 #### ✏️ 文字编辑
-- 功能开发中，敬请期待
-- 计划支持：替换、添加、删除文字
+支持两种编辑模式：
+
+**🔍 搜索替换模式**
+- 全局搜索PDF中的文字内容
+- 支持大小写敏感/不敏感搜索
+- 显示搜索结果上下文预览
+- 批量选择匹配项进行替换或删除
+- 自动检测并保持原文字体、字号、颜色
+
+**📝 文本块选择模式**
+- 可视化展示PDF页面文本块
+- 点击选择要编辑的文本块
+- 直接修改文本内容
+- 显示检测到的字体信息（字体、字号、颜色）
+- 支持自定义字体设置
+
+**字体支持**
+- 内置中文字体：仿宋、宋体、黑体、楷体、等线、微软雅黑
+- 支持西文字体：Helvetica、Times New Roman、Courier New、Arial
+- 自动匹配原文字体风格
+
+**注意事项**
+- 替换文本字数应尽量与原文相近，避免排版问题
+- 部分特殊字体可能存在兼容性问题
 
 ---
 
@@ -115,7 +137,7 @@
 │  │  SvelteKit 2.x + TypeScript 5.x + TailwindCSS v4           ││
 │  │  ┌─────────┬─────────┬──────────┬─────────┐                ││
 │  │  │ PDF合并 │ PDF分拆 │ 图片转PDF │ 文字编辑│                ││
-│  │  │   ✅    │   ✅    │   ✅     │   🚧    │                ││
+│  │  │   ✅    │   ✅    │   ✅     │   ✅    │                ││
 │  │  └─────────┴─────────┴──────────┴─────────┘                ││
 │  └─────────────────────────────────────────────────────────────┘│
 └─────────────────────────────────────────────────────────────────┘
@@ -124,7 +146,7 @@
 │                  后端层 (Rust Main Process)                      │
 │  ┌─────────────────────────────────────────────────────────────┐│
 │  │  Tauri 2.x Plugins: dialog, fs, shell                       ││
-│  │  Commands: pdf_merge, pdf_split, pdf_batch_split, etc.      ││
+│  │  Commands: pdf_merge, pdf_split, pdf_edit_text, etc.        ││
 │  └─────────────────────────────────────────────────────────────┘│
 └─────────────────────────────────────────────────────────────────┘
                           ↕ JSON-RPC 2.0 (stdio)
@@ -132,7 +154,7 @@
 │               PDF处理层 (Python Sidecar)                         │
 │  ┌─────────────────────────────────────────────────────────────┐│
 │  │  PyMuPDF 1.24+ (fitz) - PDF Operations                       ││
-│  │  Handlers: merge, split, batch_split, convert, thumbnails   ││
+│  │  Handlers: merge, split, convert, edit, thumbnails, search  ││
 │  └─────────────────────────────────────────────────────────────┘│
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -144,7 +166,7 @@
 ### 🚀 快速开始
 
 #### 安装版（推荐）
-1. 双击 `PDF Editor_0.1.1_x64-setup.exe`
+1. 双击 `PDF Editor_0.2.0_x64-setup.exe`
 2. 按照安装向导完成安装
 3. 启动应用即可使用
 
@@ -152,7 +174,7 @@
 
 - **操作系统**：Windows 10/11 (x64)
 - **运行时**：无需额外安装（所有依赖已打包）
-- **磁盘空间**：约 100 MB
+- **磁盘空间**：约 150 MB
 
 ---
 
@@ -239,6 +261,7 @@ pdf-editor/
 │   │   ├── lib.rs             # Tauri命令
 │   │   └── sidecar/mod.rs     # JSON-RPC客户端
 │   ├── binaries/               # Sidecar可执行文件
+│   ├── fonts/                  # 内置中文字体
 │   ├── Cargo.toml
 │   └── tauri.conf.json
 ├── pdf-sidecar/                # Python PDF处理器
@@ -249,8 +272,8 @@ pdf-editor/
 │   │       ├── split.py       # pdf.split
 │   │       ├── batch_split.py # pdf.batch_split
 │   │       ├── convert.py     # pdf.convert_images
-│   │       ├── edit.py        # pdf.edit_text
-│   │       └── thumbnails.py  # pdf.get_thumbnails
+│   │       ├── edit.py        # pdf.edit_text, pdf.get_text_blocks, pdf.search_text
+│   │       └── thumbnails.py  # pdf.get_thumbnails, pdf.get_page_preview
 │   └── requirements.txt
 └── static/
 ```
@@ -268,8 +291,11 @@ pdf-editor/
 | `pdf.batch_split` | batch_split.py | 批量分拆多个PDF |
 | `pdf.convert_images` | convert.py | 图片转PDF |
 | `pdf.edit_text` | edit.py | 编辑PDF文字 |
+| `pdf.get_text_blocks` | edit.py | 获取页面文本块 |
+| `pdf.search_text` | edit.py | 搜索PDF文字 |
 | `pdf.get_thumbnails` | thumbnails.py | 生成页面缩略图 |
 | `pdf.get_file_preview` | thumbnails.py | 生成首页预览 |
+| `pdf.get_page_preview` | thumbnails.py | 生成指定页面预览 |
 
 ### Tauri命令（IPC接口）
 
@@ -300,6 +326,7 @@ pdf-editor/
 - **合并**: `{原文件名}_merge.pdf`（取第一个文件名）
 - **分拆**: `{原文件名}_split_1.pdf`, `{原文件名}_split_2.pdf`, ...
 - **图片转PDF**: `{第一张图片名}.pdf`
+- **文字编辑**: `{原文件名}_edited.pdf`
 
 ---
 
@@ -309,8 +336,27 @@ pdf-editor/
 - [x] ~~CSP已禁用~~ ✅ 已启用CSP安全策略
 - [ ] PyMuPDF AGPL-3.0许可证兼容性检查
 - [x] ~~Sidecar未配置打包~~ ✅ 已完成
+- [x] ~~文字编辑功能未完成~~ ✅ 已完成
 - [ ] 无单元/集成测试
 - [ ] 无CI/CD流程
+
+---
+
+## 更新日志
+
+### v0.2.0
+- ✨ 新增文字编辑功能
+  - 搜索替换模式：全局搜索并批量替换/删除文字
+  - 文本块选择模式：可视化选择并编辑文本块
+  - 自动检测原文字体、字号、颜色
+  - 内置中文字体支持（仿宋、宋体、黑体、楷体等）
+- 🎨 优化窗口默认尺寸，提升预览体验
+- 🐛 修复预览图与文本块位置不对齐问题
+
+### v0.1.1
+- ✨ 新增批量分拆功能
+- 🔒 修复安全问题，启用CSP
+- 🧹 清理项目结构
 
 ---
 
@@ -325,6 +371,8 @@ MIT License
 - [Tauri](https://tauri.app/) - 跨平台桌面应用框架
 - [PyMuPDF](https://pymupdf.readthedocs.io/) - PDF处理库
 - [Svelte](https://svelte.dev/) - 前端框架
+- [Noto Fonts](https://fonts.google.com/noto) - 中文字体
+- [TW-Kai](https://fonts.google.com/noto) - 楷体字体
 
 ---
 
